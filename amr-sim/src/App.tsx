@@ -120,10 +120,14 @@ function runSelfTests() {
   if (errs.length) console.error('[AMR self-tests] FAILED:', errs); else console.log('[AMR self-tests] OK');
 }
 
+const POLL_ENDPOINT = import.meta.env.VITE_OBSTACLE_ENDPOINT ?? "/obstacle";
+const POLL_INTERVAL_MS = 1000;
+
 export default function AMRSimulator() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const trailRef = useRef<HTMLCanvasElement | null>(null);
   const debugHoldRef = useRef(false);
+  const obstacleServerRef = useRef(false);
 
   // キー入力（1で障害ON/OFF）
   useEffect(() => {
@@ -132,6 +136,32 @@ export default function AMRSimulator() {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
+  }, []);
+
+  // サーバーから障害物状態を取得して参照を更新
+  useEffect(() => {
+    let mounted = true;
+
+    async function pollOnce() {
+      try {
+        const res = await fetch(POLL_ENDPOINT, { cache: "no-store" });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const text = await res.text();
+        if (!mounted) return;
+        obstacleServerRef.current = text.trim() === "1";
+      } catch (err) {
+        if (!mounted) return;
+        obstacleServerRef.current = false;
+        console.warn("[AMR] obstacle polling failed", err);
+      }
+    }
+
+    pollOnce();
+    const id = setInterval(pollOnce, POLL_INTERVAL_MS);
+    return () => {
+      mounted = false;
+      clearInterval(id);
+    };
   }, []);
 
   useEffect(() => {
@@ -178,7 +208,7 @@ export default function AMRSimulator() {
 
     function step(now: number) {
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
-      const active = debugHoldRef.current;
+      const active = debugHoldRef.current || obstacleServerRef.current;
 
       // 押下を開始したフレームで grace をリセット
       if (active && !prevActive) {

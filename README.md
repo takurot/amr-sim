@@ -3,7 +3,7 @@
 ## 概要
 
 3台のAMRが、6つの棚の間の通路を**矩形ループ**で周回する様子を可視化するシミュレーターです。
-障害物（中央通路固定）は**「1」キー押下中のみ有効**。障害物ON時は、中央系ループにいるAMRは**その周回は1回だけ通過**してから**次のラップ境界で固定の外側ループへ迂回**します。障害物OFFに戻ると、**次のラップ境界で元ルートに復帰**します。
+障害物（中央通路固定）は **1キー押下** に加えて、任意の HTTP エンドポイントからの指示でも ON/OFF を切り替えられます。障害物ON時は、中央系ループにいるAMRは**その周回は1回だけ通過**してから**次のラップ境界で固定の外側ループへ迂回**します。障害物OFFに戻ると、**次のラップ境界で元ルートに復帰**します。
 
 ## 主な特徴
 
@@ -15,12 +15,13 @@
 
 ## デモ操作
 
-* **1キー押下**：中央通路を障害物ON
+* **1キー押下**：中央通路を障害物ON（手動トグル）
 
   * 中央系ループにいたAMRは“その周回は通過OK”、**次周回から**固定迂回（`leftMid/center → leftOuter`, `rightMid → rightOuter`）
 * **1キー解放**：障害物OFF
 
   * **次周回から**元のデフォルトループへ復帰
+* **サーバー応答**：`VITE_OBSTACLE_ENDPOINT` で指定したURLを1秒ごとにポーリングし、HTTP 200 + 本文`1`なら障害物ON、本文`0`または通信失敗ならOFF
 * 常時：**3台のAMR**（赤/青/緑）が各ループを周回し続けます
 
 ## 画面仕様
@@ -99,23 +100,7 @@ const TRANSITION_VEL = 220 * SPEED_MULT; // 切替時の水平スライド速度
 ## 拡張（任意）
 
 * **外部HTTPサーバ連携（障害物状態取得）**
-  現在は「1キー押下でON/解放でOFF」。HTTPに切り替える場合は、`debugHoldRef.current` の代わりに定期ポーリングで状態を取得してください：
-
-  ```ts
-  // 例：500msごとに /obstacle をfetchして 1/0 を読む
-  const obstacleRef = useRef(false);
-  useEffect(() => {
-    const id = setInterval(async () => {
-      try {
-        const res = await fetch('/obstacle');  // 1 or 0 を返すHTTP
-        const txt = await res.text();
-        obstacleRef.current = txt.trim() === '1';
-      } catch {}
-    }, 500);
-    return () => clearInterval(id);
-  }, []);
-  // 以降は active = obstacleRef.current; を使用
-  ```
+  標準で `POLL_ENDPOINT = import.meta.env.VITE_OBSTACLE_ENDPOINT ?? "/obstacle"` を1秒間隔でポーリングし、本文が `"1"` のとき障害物ON、`"0"` または通信失敗時はOFFになります。環境変数でエンドポイントを上書きできます（例：`.env.local` に `VITE_OBSTACLE_ENDPOINT=https://example.com/api/obstacle`）。
 * **AMRごとの特性**：色別に `BASE_SPEED` や `SPEED_JITTER` を変える、半径 `RADIUS` を変えるなど
 * **棚・通路配置**：`SHELF_W/H` や `SHELF_COLS`、`MARGIN_X` を調整してレイアウト変更
 
