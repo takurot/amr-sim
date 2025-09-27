@@ -51,9 +51,6 @@ const OBSTACLE_RADIUS = 28;
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function clamp(v:number,a:number,b:number){ return Math.max(a, Math.min(b, v)); }
-function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const dx = a.x - b.x, dy = a.y - b.y; return Math.hypot(dx, dy);
-}
 
 function segmentIntersectsCircle(
   ax: number,
@@ -299,20 +296,23 @@ export default function AMRSimulator() {
         } else {
           // 2) 通常の矩形周回
           const target = b.path[b.idx];
-          const d = dist(b.pos, target), v = b.speed * dt;
-          
-          // 通常の移動処理（障害物回避を含む）
-          if (true) {
-            // 通常の移動処理
-            if (d <= v) {
-              const newPos = { x: target.x, y: target.y };
-              b.pos = newPos;
-              b.idx = (b.idx + 1) % b.path.length;
+          const dx = target.x - b.pos.x;
+          const dy = target.y - b.pos.y;
+          const v = b.speed * dt;
+          const d = Math.hypot(dx, dy);
+          if (d <= v) { // Targetに到達
+            b.pos = { x: target.x, y: target.y };
+            // 次のwaypointへ
+            // 迂回待機中は、経路を逆走しつづける
+            if (isCentralLoop(b.loop) && b.reroutePending) {
+              b.idx = (b.idx - 1 + b.path.length) % b.path.length;
             } else {
-              const t = v / d;
-              const newPos = { x: lerp(b.pos.x, target.x, t), y: lerp(b.pos.y, target.y, t) };
-              b.pos = newPos;
+              b.idx = (b.idx + 1) % b.path.length;
             }
+          } else {
+            // まだTargetに到達していない
+            b.pos.x += dx / d * v;
+            b.pos.y += dy / d * v;
           }
         }
 
