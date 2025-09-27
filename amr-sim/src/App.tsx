@@ -265,10 +265,6 @@ export default function AMRSimulator() {
           b.reroutePending = false; 
           b.restorePending = false; 
           b.reversePending = false;
-          // 障害物ON時に中央ループAMRを即座に迂回予約
-          if (isCentralLoop(b.loop)) {
-            b.reroutePending = true;
-          }
         }
       }
 
@@ -297,17 +293,23 @@ export default function AMRSimulator() {
           const target = b.path[b.idx];
           const d = dist(b.pos, target), v = b.speed * dt;
           
-          // 障害物圏内にいる場合は強制的に圏外に押し出す
+          // 障害物圏内にいる場合は逆方向への移動を促す
           if (active && isCentralLoop(b.loop) && isInObstacleZone(b.pos)) {
+            // 現在のターゲットが障害物に近づく方向なら逆方向に変更
             const centerX = xOf("center");
             const centerY = CY;
-            const dx = b.pos.x - centerX;
-            const dy = b.pos.y - centerY;
-            const dist = Math.hypot(dx, dy);
-            if (dist > 0) {
-              const pushDist = (OBSTACLE_RADIUS + 5) - dist;
-              b.pos.x += (dx / dist) * pushDist;
-              b.pos.y += (dy / dist) * pushDist;
+            const currentDist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
+            const targetDist = Math.hypot(target.x - centerX, target.y - centerY);
+            
+            if (targetDist < currentDist) {
+              // ターゲットが障害物に近い場合は逆方向に移動
+              b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+              const newTarget = b.path[b.idx];
+              const newD = dist(b.pos, newTarget);
+              if (newD > 0) {
+                const t = Math.min(v / newD, 1);
+                b.pos = { x: lerp(b.pos.x, newTarget.x, t), y: lerp(b.pos.y, newTarget.y, t) };
+              }
             }
           } else {
             // 通常の移動（障害物がない場合、または障害物圏外の場合のみ）
@@ -339,12 +341,15 @@ export default function AMRSimulator() {
         const wrapped = b.lastIdx > b.idx; b.lastIdx = b.idx;
 
         if (wrapped) {
-          if (active) {
-            if (!obstacleTriggeredRef.current && isCentralLoop(b.loop)) {
-              b.reroutePending = true;
+          if (active && isCentralLoop(b.loop)) {
+            // 中央系ループで障害物ON時は迂回予約
+            b.reroutePending = true;
+          } else if (!active) {
+            // 障害物OFF時は元ルートへ復帰予約
+            if (b.loop !== b.defaultLoop) { 
+              b.restorePending = true; 
+              b.reroutePending = false; 
             }
-          } else {
-            if (b.loop !== b.defaultLoop) { b.restorePending = true; b.reroutePending = false; }
           }
         }
 
@@ -364,31 +369,15 @@ export default function AMRSimulator() {
             OBSTACLE_RADIUS,
           );
 
-        if (hitObstacle && !obstacleTriggeredRef.current) {
+        if (hitObstacle) {
           // 衝突フレームでは直前位置まで押し戻す
           b.pos = { x: oldX, y: oldY };
-
-          obstacleTriggeredRef.current = true;
-          for (const ob of bots) {
-            if (isCentralLoop(ob.loop)) {
-              ob.reroutePending = true;
-              ob.restorePending = false;
-              if (ob === b) {
-                ob.reversePending = true;
-              }
-            }
-          }
+          // 衝突したAMRのみを逆方向に向ける
+          b.reversePending = true;
         }
 
-        // 3) フラグ設定：ラップ境界でのみ「次に水平エッジに乗ったら切替」要求を出す
-        if (wrapped) {
-          if (!active) {
-            // 解除後は元ルートへ戻す予約
-            if (b.loop !== b.defaultLoop) { b.restorePending = true; b.reroutePending = false; }
-          }
-        }
 
-        // 4) 予約済みの切替を実行（水平エッジ優先、垂直移動中でも必要時は強制切替）
+        // 3) 予約済みの切替を実行（水平エッジ上でのみ）
         if (!b.transition) {
           const rel = horizontalRel(b.loop, b.pos, b.idx);
           if (rel) {
@@ -416,24 +405,10 @@ export default function AMRSimulator() {
               b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
               b.restorePending = false;
             }
-          } else if (b.reroutePending && active && isCentralLoop(b.loop)) {
-            // 水平エッジ外でも障害物ON時は強制迂回（最寄りの水平エッジまで移動してから切替）
-            const to = chooseDetourFor(b.defaultLoop);
-            if (to !== b.loop) {
-              const newPath = makeLoopWaypoints(to);
-              const topY = b.path[0].y;
-              const botY = b.path[2].y;
-              // 上下どちらの水平エッジが近いかを判定
-              const toTop = Math.abs(b.pos.y - topY) < Math.abs(b.pos.y - botY);
-              const targetX = toTop ? newPath[0].x : newPath[2].x;
-              const edgeY = toTop ? topY : botY;
-              b.transition = { to, edge: toTop ? 'top' : 'bottom', startX: b.pos.x, targetX, y: edgeY, progress: 0 };
-              b.reroutePending = false;
-            }
           }
         }
 
-        // 5) 軌跡（線分で描画：点々を解消）
+        // 4) 軌跡（線分で描画：点々を解消）
         const newX = b.pos.x, newY = b.pos.y;
         if (Math.hypot(newX - oldX, newY - oldY) > 0.1) {
           tctx.save();
