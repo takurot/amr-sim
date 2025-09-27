@@ -315,13 +315,13 @@ export default function AMRSimulator() {
           }
         }
 
-        // 直近の移動で障害物に当たったか判定（中央ループのみ）
+        // 障害物との衝突・侵入チェック（中央ループのみ）
         const centerX = xOf("center");
         const centerY = CY;
-        const hitObstacle =
-          active &&
-          isCentralLoop(b.loop) &&
-          segmentIntersectsCircle(
+        
+        if (active && isCentralLoop(b.loop)) {
+          // 移動軌跡での衝突チェック
+          const hitObstacle = segmentIntersectsCircle(
             oldX,
             oldY,
             b.pos.x,
@@ -330,19 +330,25 @@ export default function AMRSimulator() {
             centerY,
             OBSTACLE_RADIUS,
           );
-
-        if (hitObstacle && !obstacleTriggeredRef.current) {
-          // 衝突フレームでは直前位置まで押し戻す
-          b.pos = { x: oldX, y: oldY };
-          // 即座に逆方向のターゲットに変更
-          b.idx = (b.idx - 1 + b.path.length) % b.path.length;
           
-          // 衝突情報を共有し、全中央ループAMRに迂回を促す
-          obstacleTriggeredRef.current = true;
-          for (const ob of bots) {
-            if (isCentralLoop(ob.loop)) {
-              ob.reroutePending = true;
-              ob.restorePending = false;
+          // 現在位置での障害物圏内チェック
+          const inObstacleZone = Math.hypot(b.pos.x - centerX, b.pos.y - centerY) <= OBSTACLE_RADIUS;
+          
+          if (hitObstacle || inObstacleZone) {
+            // 衝突または圏内侵入時は直前位置まで押し戻す
+            b.pos = { x: oldX, y: oldY };
+            // 即座に逆方向のターゲットに変更
+            b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+            
+            // 初回衝突時のみ全AMRに迂回情報を共有
+            if (!obstacleTriggeredRef.current) {
+              obstacleTriggeredRef.current = true;
+              for (const ob of bots) {
+                if (isCentralLoop(ob.loop)) {
+                  ob.reroutePending = true;
+                  ob.restorePending = false;
+                }
+              }
             }
           }
         }
