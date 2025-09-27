@@ -253,9 +253,26 @@ export default function AMRSimulator() {
       // 押下を開始したフレームで grace をリセット
       if (active && !prevActive) {
         obstacleTriggeredRef.current = false;
+        const centerX = xOf("center");
+        const centerY = CY;
+        
         for (const b of bots) { 
           b.reroutePending = false; 
-          b.restorePending = false; 
+          b.restorePending = false;
+          
+          // 障害物圏内にいるAMRを安全な位置に移動
+          if (isCentralLoop(b.loop)) {
+            const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
+            if (dist <= OBSTACLE_RADIUS) {
+              // 障害物中心から外向きに安全距離まで押し出す
+              const angle = Math.atan2(b.pos.y - centerY, b.pos.x - centerX);
+              const safeDistance = OBSTACLE_RADIUS + 10; // 安全マージン
+              b.pos.x = centerX + Math.cos(angle) * safeDistance;
+              b.pos.y = centerY + Math.sin(angle) * safeDistance;
+              // 迂回フラグを設定
+              b.reroutePending = true;
+            }
+          }
         }
       }
 
