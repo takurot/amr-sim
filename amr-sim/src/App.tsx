@@ -352,30 +352,21 @@ export default function AMRSimulator() {
           const inObstacleZone = Math.hypot(b.pos.x - centerX, b.pos.y - centerY) <= OBSTACLE_RADIUS;
           
           if (hitObstacle || inObstacleZone) {
-            // 衝突時は障害物から安全距離まで押し戻す
-            const currentDist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
-            const safeDistance = OBSTACLE_RADIUS + 15; // 安全マージン
-            
-            if (currentDist < safeDistance) {
-              // 障害物中心から現在位置への方向を計算
-              const angle = Math.atan2(b.pos.y - centerY, b.pos.x - centerX);
-              // 安全距離まで押し戻す
-              b.pos.x = centerX + Math.cos(angle) * safeDistance;
-              b.pos.y = centerY + Math.sin(angle) * safeDistance;
-            }
-            
-            // 逆方向に向かう
+            // 衝突時は直前位置に戻し、逆方向に向かう
+            b.pos = { x: oldX, y: oldY };
             b.idx = (b.idx - 1 + b.path.length) % b.path.length;
             
-            // 迂回フラグを設定（水平エッジで迂回開始）
-            b.reroutePending = true;
-            b.restorePending = false;
+            // 迂回フラグを設定
+            if (!b.reroutePending) {
+              b.reroutePending = true;
+              b.restorePending = false;
+            }
             
             // 初回衝突時のみ他AMRに迂回情報を共有
             if (!obstacleTriggeredRef.current) {
               obstacleTriggeredRef.current = true;
               for (const ob of bots) {
-                if (isCentralLoop(ob.loop) && ob !== b) { // 衝突したAMR以外
+                if (isCentralLoop(ob.loop) && !ob.reroutePending) {
                   ob.reroutePending = true;
                   ob.restorePending = false;
                 }
