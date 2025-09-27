@@ -80,12 +80,6 @@ function isCentralLoop(loop: LoopName) {
   return loop === "leftMid" || loop === "center" || loop === "rightMid";
 }
 
-function isInObstacleZone(pos: { x: number; y: number }) {
-  const centerX = xOf("center");
-  const centerY = CY;
-  return Math.hypot(pos.x - centerX, pos.y - centerY) <= OBSTACLE_RADIUS;
-}
-
 const PAIRS: Record<LoopName, [ConnectorName, ConnectorName]> = {
   leftOuter: ["leftOuter", "leftMid"],
   leftMid: ["leftMid", "center"],
@@ -229,7 +223,6 @@ export default function AMRSimulator() {
       reroutePending?: boolean; // 水平エッジに入ったら迂回開始
       restorePending?: boolean; // 水平エッジに入ったら復帰開始
       transition?: { to: LoopName; edge: 'top'|'bottom'; startX:number; targetX:number; y:number; progress:number };
-      reversePending?: boolean; // 衝突後に方向転換が必要
     };
 
     const pickStart: LoopName[] = ["leftMid", "center", "rightMid"];
@@ -246,7 +239,6 @@ export default function AMRSimulator() {
         loop,
         defaultLoop: loop,
         lastIdx: 1,
-        reversePending: false,
       };
       return bot;
     });
@@ -264,7 +256,6 @@ export default function AMRSimulator() {
         for (const b of bots) { 
           b.reroutePending = false; 
           b.restorePending = false; 
-          b.reversePending = false;
         }
       }
 
@@ -293,46 +284,17 @@ export default function AMRSimulator() {
           const target = b.path[b.idx];
           const d = dist(b.pos, target), v = b.speed * dt;
           
-          // 障害物圏内にいる場合は逆方向への移動を促す
-          if (active && isCentralLoop(b.loop) && isInObstacleZone(b.pos)) {
-            // 現在のターゲットが障害物に近づく方向なら逆方向に変更
-            const centerX = xOf("center");
-            const centerY = CY;
-            const currentDist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
-            const targetDist = Math.hypot(target.x - centerX, target.y - centerY);
-            
-            if (targetDist < currentDist) {
-              // ターゲットが障害物に近い場合は逆方向に移動
-              b.idx = (b.idx - 1 + b.path.length) % b.path.length;
-              const newTarget = b.path[b.idx];
-              const newD = dist(b.pos, newTarget);
-              if (newD > 0) {
-                const t = Math.min(v / newD, 1);
-                b.pos = { x: lerp(b.pos.x, newTarget.x, t), y: lerp(b.pos.y, newTarget.y, t) };
-              }
-            }
-          } else {
-            // 通常の移動（障害物がない場合、または障害物圏外の場合のみ）
+          // 通常の移動処理（障害物回避を含む）
+          if (true) {
+            // 通常の移動処理
             if (d <= v) {
               const newPos = { x: target.x, y: target.y };
-              // 移動先が障害物圏内でないかチェック
-              if (!active || !isCentralLoop(b.loop) || !isInObstacleZone(newPos)) {
-                b.pos = newPos;
-                if (b.reversePending) {
-                  // 角に到達したら逆回転へ
-                  b.idx = (b.idx - 1 + b.path.length) % b.path.length;
-                  b.reversePending = false;
-                } else {
-                  b.idx = (b.idx + 1) % b.path.length;
-                }
-              }
+              b.pos = newPos;
+              b.idx = (b.idx + 1) % b.path.length;
             } else {
               const t = v / d;
               const newPos = { x: lerp(b.pos.x, target.x, t), y: lerp(b.pos.y, target.y, t) };
-              // 移動先が障害物圏内でないかチェック
-              if (!active || !isCentralLoop(b.loop) || !isInObstacleZone(newPos)) {
-                b.pos = newPos;
-              }
+              b.pos = newPos;
             }
           }
         }
@@ -370,10 +332,10 @@ export default function AMRSimulator() {
           );
 
         if (hitObstacle) {
-          // 衝突フレームでは直前位置まで押し戻す
+          // 衝突フレームでは直前位置まで押し戻して逆方向に移動開始
           b.pos = { x: oldX, y: oldY };
-          // 衝突したAMRのみを逆方向に向ける
-          b.reversePending = true;
+          // 即座に逆方向のターゲットに変更
+          b.idx = (b.idx - 1 + b.path.length) % b.path.length;
         }
 
 
@@ -392,7 +354,6 @@ export default function AMRSimulator() {
                 b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
                 b.reroutePending = false;
                 b.idx = rel.edge === 'top' ? 0 : 2;
-                b.reversePending = false;
               } else {
                 b.reroutePending = false;
               }
