@@ -47,11 +47,34 @@ const ROBOTS = [
 ];
 
 const RADIUS = 12;
+const OBSTACLE_RADIUS = 28;
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function clamp(v:number,a:number,b:number){ return Math.max(a, Math.min(b, v)); }
-function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const dx = a.x - b.x, dy = a.y - b.y; return Math.hypot(dx, dy);
+
+function segmentIntersectsCircle(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  radius: number,
+): boolean {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lab2 = abx * abx + aby * aby;
+  if (lab2 === 0) {
+    return Math.hypot(ax - cx, ay - cy) <= radius;
+  }
+  const t = clamp(((cx - ax) * abx + (cy - ay) * aby) / lab2, 0, 1);
+  const px = ax + abx * t;
+  const py = ay + aby * t;
+  return Math.hypot(px - cx, py - cy) <= radius;
+}
+
+function isCentralLoop(loop: LoopName) {
+  return loop === "leftMid" || loop === "center" || loop === "rightMid";
 }
 
 const PAIRS: Record<LoopName, [ConnectorName, ConnectorName]> = {
@@ -91,14 +114,14 @@ function horizontalRel(loop: LoopName, pos:{x:number;y:number}, targetIdx:number
   const path = makeLoopWaypoints(loop);
   const topY = path[0].y, botY = path[2].y; const x1=path[0].x, x2=path[1].x;
   const eps = 1.0; // 1px 以内で水平エッジとみなす
-  if (targetIdx === 1 && Math.abs(pos.y - topY) < eps){
-    // 上辺: 左(0)→右(1)
+  const onTop = (targetIdx === 1 || targetIdx === 0) && Math.abs(pos.y - topY) < eps;
+  if (onTop){
     const t = clamp((pos.x - x1) / (x2 - x1), 0, 1);
     return { edge:"top" as const, t, y: topY, from:x1, to:x2 };
   }
-  if (targetIdx === 3 && Math.abs(pos.y - botY) < eps){
-    // 下辺: 右(2)→左(3)
-    const t = clamp((pos.x - x2) / (x1 - x2), 0, 1);
+  const onBottom = (targetIdx === 3 || targetIdx === 2) && Math.abs(pos.y - botY) < eps;
+  if (onBottom){
+    const t = clamp((pos.x - x1) / (x2 - x1), 0, 1);
     return { edge:"bottom" as const, t, y: botY, from:x2, to:x1 };
   }
   return null;
@@ -128,6 +151,7 @@ export default function AMRSimulator() {
   const trailRef = useRef<HTMLCanvasElement | null>(null);
   const debugHoldRef = useRef(false);
   const obstacleServerRef = useRef(false);
+  const obstacleTriggeredRef = useRef(false);
 
   // キー入力（1で障害ON/OFF）
   useEffect(() => {
@@ -153,6 +177,9 @@ export default function AMRSimulator() {
         if (!mounted) return;
         obstacleServerRef.current = false;
         console.warn("[AMR] obstacle polling failed", err);
+      }
+      if (!debugHoldRef.current && !obstacleServerRef.current) {
+        obstacleTriggeredRef.current = false;
       }
     }
 
@@ -189,7 +216,6 @@ export default function AMRSimulator() {
       idx: number;              // 次に目指す頂点のインデックス（0..3）
       loop: LoopName;
       defaultLoop: LoopName;
-      graceUsed: boolean;       // この障害ONフェーズで一回通過を使ったか
       lastIdx: number;          // ラップ判定
       reroutePending?: boolean; // 水平エッジに入ったら迂回開始
       restorePending?: boolean; // 水平エッジに入ったら復帰開始
@@ -200,7 +226,18 @@ export default function AMRSimulator() {
     const bots: Bot[] = ROBOTS.map((r, i) => {
       const loop = pickStart[i % pickStart.length];
       const path = makeLoopWaypoints(loop);
-      return { color: r.color, pos: { x: path[0].x, y: path[0].y }, prev: { x: path[0].x, y: path[0].y }, speed: (BASE_SPEED + Math.random()*SPEED_JITTER) * SPEED_MULT, path, idx: 1, loop, defaultLoop: loop, graceUsed: false, lastIdx: 1 };
+      const bot: Bot = {
+        color: r.color,
+        pos: { x: path[0].x, y: path[0].y },
+        prev: { x: path[0].x, y: path[0].y },
+        speed: (BASE_SPEED + Math.random() * SPEED_JITTER) * SPEED_MULT,
+        path,
+        idx: 1,
+        loop,
+        defaultLoop: loop,
+        lastIdx: 1,
+      };
+      return bot;
     });
 
     let last = performance.now();
@@ -208,11 +245,32 @@ export default function AMRSimulator() {
 
     function step(now: number) {
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
-      const active = debugHoldRef.current || obstacleServerRef.current;
+  const active = debugHoldRef.current || obstacleServerRef.current;
 
       // 押下を開始したフレームで grace をリセット
       if (active && !prevActive) {
-        for (const b of bots) { b.graceUsed = false; b.reroutePending = false; }
+        obstacleTriggeredRef.current = false;
+        const centerX = xOf("center");
+        const centerY = CY;
+        
+        for (const b of bots) { 
+          b.reroutePending = false; 
+          b.restorePending = false;
+          
+          // 障害物圏内にいるAMRを安全な位置に移動
+          if (isCentralLoop(b.loop)) {
+            const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
+            if (dist <= OBSTACLE_RADIUS) {
+              // 障害物中心から外向きに安全距離まで押し出す
+              const angle = Math.atan2(b.pos.y - centerY, b.pos.x - centerX);
+              const safeDistance = OBSTACLE_RADIUS + 10; // 安全マージン
+              b.pos.x = centerX + Math.cos(angle) * safeDistance;
+              b.pos.y = centerY + Math.sin(angle) * safeDistance;
+              // 迂回フラグを設定
+              b.reroutePending = true;
+            }
+          }
+        }
       }
 
       // --- トレイルをフェード ---
@@ -238,45 +296,106 @@ export default function AMRSimulator() {
         } else {
           // 2) 通常の矩形周回
           const target = b.path[b.idx];
-          const d = dist(b.pos, target), v = b.speed * dt;
-          if (d <= v) { b.pos = { x: target.x, y: target.y }; b.idx = (b.idx + 1) % b.path.length; }
-          else { const t = v / d; b.pos = { x: lerp(b.pos.x, target.x, t), y: lerp(b.pos.y, target.y, t) }; }
+          const dx = target.x - b.pos.x;
+          const dy = target.y - b.pos.y;
+          const v = b.speed * dt;
+          const d = Math.hypot(dx, dy);
+          if (d <= v) { // Targetに到達
+            b.pos = { x: target.x, y: target.y };
+            // 次のwaypointへ
+            // 迂回待機中は、経路を逆走しつづける
+            if (isCentralLoop(b.loop) && b.reroutePending) {
+              b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+            } else {
+              b.idx = (b.idx + 1) % b.path.length;
+            }
+          } else {
+            // まだTargetに到達していない
+            b.pos.x += dx / d * v;
+            b.pos.y += dy / d * v;
+          }
         }
 
         // ラップ境界検出
         const wrapped = b.lastIdx > b.idx; b.lastIdx = b.idx;
 
-        // 3) フラグ設定：ラップ境界でのみ「次に水平エッジに乗ったら切替」要求を出す
         if (wrapped) {
-          if (active) {
-            // 中央系ループなら1回通過後に迂回を予約
-            if (!b.graceUsed && (b.loop === 'center' || b.loop === 'leftMid' || b.loop === 'rightMid')) {
-              b.graceUsed = true; b.reroutePending = true; b.restorePending = false;
+          if (active && isCentralLoop(b.loop)) {
+            // 中央系ループで障害物ON時は迂回予約
+            b.reroutePending = true;
+          } else if (!active) {
+            // 障害物OFF時は元ルートへ復帰予約
+            if (b.loop !== b.defaultLoop) { 
+              b.restorePending = true; 
+              b.reroutePending = false; 
             }
-          } else {
-            // 解除後は元ルートへ戻す予約
-            if (b.loop !== b.defaultLoop) { b.restorePending = true; b.reroutePending = false; }
           }
         }
 
-        // 4) 水平エッジ上にいるときだけ、予約済みの切替を実行（X方向のみ移動）
+        // 障害物との衝突・侵入チェック（中央ループのみ）
+        const centerX = xOf("center");
+        const centerY = CY;
+        
+        if (active && isCentralLoop(b.loop)) {
+          // 移動軌跡での衝突チェック
+          const hitObstacle = segmentIntersectsCircle(
+            oldX,
+            oldY,
+            b.pos.x,
+            b.pos.y,
+            centerX,
+            centerY,
+            OBSTACLE_RADIUS,
+          );
+          
+          // 現在位置での障害物圏内チェック
+          const inObstacleZone = Math.hypot(b.pos.x - centerX, b.pos.y - centerY) <= OBSTACLE_RADIUS;
+          
+          if (hitObstacle || inObstacleZone) {
+            // 衝突時は直前位置に戻し、逆方向に向かう
+            b.pos = { x: oldX, y: oldY };
+            b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+            
+            // 迂回フラグを設定
+            if (!b.reroutePending) {
+              b.reroutePending = true;
+              b.restorePending = false;
+            }
+            
+            // 初回衝突時のみ他AMRに迂回情報を共有
+            if (!obstacleTriggeredRef.current) {
+              obstacleTriggeredRef.current = true;
+              for (const ob of bots) {
+                if (isCentralLoop(ob.loop) && !ob.reroutePending) {
+                  ob.reroutePending = true;
+                  ob.restorePending = false;
+                }
+              }
+            }
+          }
+        }
+
+
+        // 3) 予約済みの切替を実行（水平エッジ上でのみ）
         if (!b.transition) {
           const rel = horizontalRel(b.loop, b.pos, b.idx);
           if (rel) {
             if (b.reroutePending) {
+              // 迂回処理
               const to = chooseDetourFor(b.defaultLoop);
               if (to !== b.loop) {
                 const newPath = makeLoopWaypoints(to);
-                const newX1 = newPath[0].x, newX2 = newPath[1].x;
-                const targetX = (rel.edge === 'top')
-                  ? lerp(newX1, newX2, rel.t)
-                  : lerp(newPath[2].x, newPath[3].x, rel.t); // 下辺は右→左
+                const targetX = rel.edge === 'top'
+                  ? newPath[0].x
+                  : newPath[2].x;
                 b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
                 b.reroutePending = false;
+                b.idx = rel.edge === 'top' ? 0 : 2;
               } else {
-                b.reroutePending = false; // すでに迂回ループ
+                b.reroutePending = false;
               }
-            } else if (b.restorePending) {
+            } else if (b.restorePending && !active) {
+              // 復帰処理（障害物がOFFの時のみ）
               const to = b.defaultLoop;
               const newPath = makeLoopWaypoints(to);
               const targetX = (rel.edge === 'top')
@@ -288,7 +407,7 @@ export default function AMRSimulator() {
           }
         }
 
-        // 5) 軌跡（線分で描画：点々を解消）
+        // 4) 軌跡（線分で描画：点々を解消）
         const newX = b.pos.x, newY = b.pos.y;
         if (Math.hypot(newX - oldX, newY - oldY) > 0.1) {
           tctx.save();
