@@ -331,41 +331,65 @@ export default function AMRSimulator() {
             OBSTACLE_RADIUS,
           );
 
-        if (hitObstacle) {
-          // 衝突フレームでは直前位置まで押し戻して逆方向に移動開始
+        if (hitObstacle && !obstacleTriggeredRef.current) {
+          // 衝突フレームでは直前位置まで押し戻す
           b.pos = { x: oldX, y: oldY };
           // 即座に逆方向のターゲットに変更
           b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+          
+          // 衝突情報を共有し、全中央ループAMRに迂回を促す
+          obstacleTriggeredRef.current = true;
+          for (const ob of bots) {
+            if (isCentralLoop(ob.loop)) {
+              ob.reroutePending = true;
+              ob.restorePending = false;
+            }
+          }
         }
 
 
-        // 3) 予約済みの切替を実行（水平エッジ上でのみ）
-        if (!b.transition) {
+        // 3) 予約済みの切替を実行
+        if (!b.transition && b.reroutePending) {
+          const rel = horizontalRel(b.loop, b.pos, b.idx);
+          const to = chooseDetourFor(b.defaultLoop);
+          
+          if (to !== b.loop) {
+            if (rel) {
+              // 水平エッジ上での切替（優先）
+              const newPath = makeLoopWaypoints(to);
+              const targetX = rel.edge === 'top'
+                ? newPath[0].x
+                : newPath[2].x;
+              b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
+              b.reroutePending = false;
+              b.idx = rel.edge === 'top' ? 0 : 2;
+            } else {
+              // 水平エッジ外では最寄りの水平エッジへ移動してから切替
+              const topY = b.path[0].y;
+              const botY = b.path[2].y;
+              const toTop = Math.abs(b.pos.y - topY) < Math.abs(b.pos.y - botY);
+              const newPath = makeLoopWaypoints(to);
+              const targetX = toTop ? newPath[0].x : newPath[2].x;
+              const edgeY = toTop ? topY : botY;
+              b.transition = { to, edge: toTop ? 'top' : 'bottom', startX: b.pos.x, targetX, y: edgeY, progress: 0 };
+              b.reroutePending = false;
+            }
+          } else {
+            b.reroutePending = false;
+          }
+        }
+        
+        // 復帰処理（水平エッジ上でのみ）
+        if (!b.transition && b.restorePending) {
           const rel = horizontalRel(b.loop, b.pos, b.idx);
           if (rel) {
-            // 水平エッジ上での切替（優先）
-            if (b.reroutePending) {
-              const to = chooseDetourFor(b.defaultLoop);
-              if (to !== b.loop) {
-                const newPath = makeLoopWaypoints(to);
-                const targetX = rel.edge === 'top'
-                  ? newPath[0].x
-                  : newPath[2].x;
-                b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
-                b.reroutePending = false;
-                b.idx = rel.edge === 'top' ? 0 : 2;
-              } else {
-                b.reroutePending = false;
-              }
-            } else if (b.restorePending) {
-              const to = b.defaultLoop;
-              const newPath = makeLoopWaypoints(to);
-              const targetX = (rel.edge === 'top')
-                ? lerp(newPath[0].x, newPath[1].x, rel.t)
-                : lerp(newPath[2].x, newPath[3].x, rel.t);
-              b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
-              b.restorePending = false;
-            }
+            const to = b.defaultLoop;
+            const newPath = makeLoopWaypoints(to);
+            const targetX = (rel.edge === 'top')
+              ? lerp(newPath[0].x, newPath[1].x, rel.t)
+              : lerp(newPath[2].x, newPath[3].x, rel.t);
+            b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
+            b.restorePending = false;
           }
         }
 
