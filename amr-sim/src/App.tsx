@@ -335,16 +335,44 @@ export default function AMRSimulator() {
           const inObstacleZone = Math.hypot(b.pos.x - centerX, b.pos.y - centerY) <= OBSTACLE_RADIUS;
           
           if (hitObstacle || inObstacleZone) {
-            // 衝突または圏内侵入時は直前位置まで押し戻す
-            b.pos = { x: oldX, y: oldY };
-            // 即座に逆方向のターゲットに変更
-            b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+            // 衝突時は最寄りの水平エッジに移動して即座に迂回開始
+            const topY = CY - SHELF_H / 2 - 60; // 上連絡路
+            const bottomY = CY + SHELF_H / 2 + 60; // 下連絡路
+            const distToTop = Math.abs(b.pos.y - topY);
+            const distToBottom = Math.abs(b.pos.y - bottomY);
             
-            // 初回衝突時のみ全AMRに迂回情報を共有
+            // 最寄りの水平エッジに移動
+            if (distToTop <= distToBottom) {
+              b.pos = { x: b.pos.x, y: topY };
+              b.idx = 0; // 上端の開始インデックス
+            } else {
+              b.pos = { x: b.pos.x, y: bottomY };
+              b.idx = 2; // 下端の開始インデックス
+            }
+            
+            // 即座に迂回処理を開始
+            const to = chooseDetourFor(b.defaultLoop);
+            if (to !== b.loop) {
+              const newPath = makeLoopWaypoints(to);
+              const isTopEdge = (distToTop <= distToBottom);
+              const targetX = isTopEdge ? newPath[0].x : newPath[2].x;
+              
+              b.transition = {
+                to,
+                edge: isTopEdge ? 'top' : 'bottom',
+                startX: b.pos.x,
+                targetX,
+                y: b.pos.y,
+                progress: 0
+              };
+              b.reroutePending = false; // 迂回開始済み
+            }
+            
+            // 初回衝突時のみ他AMRに迂回情報を共有
             if (!obstacleTriggeredRef.current) {
               obstacleTriggeredRef.current = true;
               for (const ob of bots) {
-                if (isCentralLoop(ob.loop)) {
+                if (isCentralLoop(ob.loop) && ob !== b) { // 衝突したAMR以外
                   ob.reroutePending = true;
                   ob.restorePending = false;
                 }
