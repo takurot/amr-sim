@@ -304,6 +304,9 @@ export default function AMRSimulator() {
           );
 
         if (hitObstacle && !obstacleTriggeredRef.current) {
+          // 衝突フレームでは直前位置まで押し戻す
+          b.pos = { x: oldX, y: oldY };
+
           obstacleTriggeredRef.current = true;
           for (const ob of bots) {
             if (isCentralLoop(ob.loop)) {
@@ -329,10 +332,9 @@ export default function AMRSimulator() {
               const to = chooseDetourFor(b.defaultLoop);
               if (to !== b.loop) {
                 const newPath = makeLoopWaypoints(to);
-                const newX1 = newPath[0].x, newX2 = newPath[1].x;
-                const targetX = (rel.edge === 'top')
-                  ? lerp(newX1, newX2, rel.t)
-                  : lerp(newPath[2].x, newPath[3].x, rel.t); // 下辺は右→左
+                const targetX = rel.edge === 'top'
+                  ? newPath[0].x
+                  : newPath[2].x; // 下辺は右端から開始
                 b.transition = { to, edge: rel.edge, startX: b.pos.x, targetX, y: rel.y, progress: 0 };
                 b.reroutePending = false;
               } else {
