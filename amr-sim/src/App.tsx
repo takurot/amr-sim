@@ -47,11 +47,37 @@ const ROBOTS = [
 ];
 
 const RADIUS = 12;
+const OBSTACLE_RADIUS = 12;
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function clamp(v:number,a:number,b:number){ return Math.max(a, Math.min(b, v)); }
 function dist(a: { x: number; y: number }, b: { x: number; y: number }) {
   const dx = a.x - b.x, dy = a.y - b.y; return Math.hypot(dx, dy);
+}
+
+function segmentIntersectsCircle(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  radius: number,
+): boolean {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const lab2 = abx * abx + aby * aby;
+  if (lab2 === 0) {
+    return Math.hypot(ax - cx, ay - cy) <= radius;
+  }
+  const t = clamp(((cx - ax) * abx + (cy - ay) * aby) / lab2, 0, 1);
+  const px = ax + abx * t;
+  const py = ay + aby * t;
+  return Math.hypot(px - cx, py - cy) <= radius;
+}
+
+function isCentralLoop(loop: LoopName) {
+  return loop === "leftMid" || loop === "center" || loop === "rightMid";
 }
 
 const PAIRS: Record<LoopName, [ConnectorName, ConnectorName]> = {
@@ -128,6 +154,7 @@ export default function AMRSimulator() {
   const trailRef = useRef<HTMLCanvasElement | null>(null);
   const debugHoldRef = useRef(false);
   const obstacleServerRef = useRef(false);
+  const obstacleTriggeredRef = useRef(false);
 
   // キー入力（1で障害ON/OFF）
   useEffect(() => {
@@ -153,6 +180,9 @@ export default function AMRSimulator() {
         if (!mounted) return;
         obstacleServerRef.current = false;
         console.warn("[AMR] obstacle polling failed", err);
+      }
+      if (!debugHoldRef.current && !obstacleServerRef.current) {
+        obstacleTriggeredRef.current = false;
       }
     }
 
@@ -189,7 +219,6 @@ export default function AMRSimulator() {
       idx: number;              // 次に目指す頂点のインデックス（0..3）
       loop: LoopName;
       defaultLoop: LoopName;
-      graceUsed: boolean;       // この障害ONフェーズで一回通過を使ったか
       lastIdx: number;          // ラップ判定
       reroutePending?: boolean; // 水平エッジに入ったら迂回開始
       restorePending?: boolean; // 水平エッジに入ったら復帰開始
@@ -200,7 +229,18 @@ export default function AMRSimulator() {
     const bots: Bot[] = ROBOTS.map((r, i) => {
       const loop = pickStart[i % pickStart.length];
       const path = makeLoopWaypoints(loop);
-      return { color: r.color, pos: { x: path[0].x, y: path[0].y }, prev: { x: path[0].x, y: path[0].y }, speed: (BASE_SPEED + Math.random()*SPEED_JITTER) * SPEED_MULT, path, idx: 1, loop, defaultLoop: loop, graceUsed: false, lastIdx: 1 };
+      const bot: Bot = {
+        color: r.color,
+        pos: { x: path[0].x, y: path[0].y },
+        prev: { x: path[0].x, y: path[0].y },
+        speed: (BASE_SPEED + Math.random() * SPEED_JITTER) * SPEED_MULT,
+        path,
+        idx: 1,
+        loop,
+        defaultLoop: loop,
+        lastIdx: 1,
+      };
+      return bot;
     });
 
     let last = performance.now();
@@ -208,11 +248,12 @@ export default function AMRSimulator() {
 
     function step(now: number) {
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
-      const active = debugHoldRef.current || obstacleServerRef.current;
+  const active = debugHoldRef.current || obstacleServerRef.current;
 
       // 押下を開始したフレームで grace をリセット
       if (active && !prevActive) {
-        for (const b of bots) { b.graceUsed = false; b.reroutePending = false; }
+        obstacleTriggeredRef.current = false;
+        for (const b of bots) { b.reroutePending = false; b.restorePending = false; }
       }
 
       // --- トレイルをフェード ---
@@ -246,14 +287,35 @@ export default function AMRSimulator() {
         // ラップ境界検出
         const wrapped = b.lastIdx > b.idx; b.lastIdx = b.idx;
 
+        // 直近の移動で障害物に当たったか判定（中央ループのみ）
+        const centerX = xOf("center");
+        const centerY = CY;
+        const hitObstacle =
+          active &&
+          isCentralLoop(b.loop) &&
+          segmentIntersectsCircle(
+            oldX,
+            oldY,
+            b.pos.x,
+            b.pos.y,
+            centerX,
+            centerY,
+            OBSTACLE_RADIUS,
+          );
+
+        if (hitObstacle && !obstacleTriggeredRef.current) {
+          obstacleTriggeredRef.current = true;
+          for (const ob of bots) {
+            if (isCentralLoop(ob.loop)) {
+              ob.reroutePending = true;
+              ob.restorePending = false;
+            }
+          }
+        }
+
         // 3) フラグ設定：ラップ境界でのみ「次に水平エッジに乗ったら切替」要求を出す
         if (wrapped) {
-          if (active) {
-            // 中央系ループなら1回通過後に迂回を予約
-            if (!b.graceUsed && (b.loop === 'center' || b.loop === 'leftMid' || b.loop === 'rightMid')) {
-              b.graceUsed = true; b.reroutePending = true; b.restorePending = false;
-            }
-          } else {
+          if (!active) {
             // 解除後は元ルートへ戻す予約
             if (b.loop !== b.defaultLoop) { b.restorePending = true; b.reroutePending = false; }
           }
