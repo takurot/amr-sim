@@ -254,21 +254,24 @@ export default function AMRSimulator() {
         const centerY = CY;
         
         for (const b of bots) { 
-          b.reroutePending = false; 
           b.restorePending = false;
-          
-          // 障害物圏内にいるAMRを安全な位置に移動
           if (isCentralLoop(b.loop)) {
+            // 障害物圏内にいるAMRを安全な位置に移動
             const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
             if (dist <= OBSTACLE_RADIUS) {
-              // 障害物中心から外向きに安全距離まで押し出す
               const angle = Math.atan2(b.pos.y - centerY, b.pos.x - centerX);
-              const safeDistance = OBSTACLE_RADIUS + 10; // 安全マージン
+              const safeDistance = OBSTACLE_RADIUS + 10;
               b.pos.x = centerX + Math.cos(angle) * safeDistance;
               b.pos.y = centerY + Math.sin(angle) * safeDistance;
-              // 迂回フラグを設定
-              b.reroutePending = true;
             }
+
+            // 即座に迂回状態へ移行（逆走開始）
+            b.reroutePending = true;
+            const prevIdx = (b.idx - 1 + b.path.length) % b.path.length;
+            b.idx = prevIdx;
+            b.lastIdx = prevIdx;
+          } else {
+            b.reroutePending = false;
           }
         }
       }
