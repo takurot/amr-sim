@@ -257,12 +257,13 @@ export default function AMRSimulator() {
         for (const b of bots) { 
           b.restorePending = false;
           if (isCentralLoop(b.loop)) {
-            // 障害物圏内にいるAMRを安全な位置に移動（Y方向のみ）
+            // 障害物圏内にいるAMRを安全な位置に移動（進行方向と逆へ）
             const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
             if (dist <= OBSTACLE_RADIUS) {
-              // 垂直方向にのみ押し出す
-              const safeDistance = OBSTACLE_RADIUS + 10;
-              b.pos.y = centerY + (b.pos.y > centerY ? safeDistance : -safeDistance);
+              const target = b.path[b.idx];
+              const movingUp = target.y < b.pos.y;
+              // 進行方向と逆向きに押し戻す
+              b.pos.y += movingUp ? 15 : -15; // 15px押し戻す
               b.justPushed = true; // このフレームで押し出されたことを記録
             }
 
