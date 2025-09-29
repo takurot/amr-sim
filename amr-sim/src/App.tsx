@@ -219,7 +219,8 @@ export default function AMRSimulator() {
       lastIdx: number;          // ラップ判定
       reroutePending?: boolean; // 水平エッジに入ったら迂回開始
       restorePending?: boolean; // 水平エッジに入ったら復帰開始
-      transition?: { to: LoopName; edge: 'top'|'bottom'; startX:number; targetX:number; y:number; progress:number };
+      transition?: { to: LoopName; edge: 'top'|'bottom'; startX:number; targetX:number; y:number; progress: number };
+      justPushed?: boolean; // 障害物ON時に押し出されたばかりか
     };
 
     const pickStart: LoopName[] = ["leftMid", "center", "rightMid"];
@@ -262,6 +263,7 @@ export default function AMRSimulator() {
               // 垂直方向にのみ押し出す
               const safeDistance = OBSTACLE_RADIUS + 10;
               b.pos.y = centerY + (b.pos.y > centerY ? safeDistance : -safeDistance);
+              b.justPushed = true; // このフレームで押し出されたことを記録
             }
 
             // 即座に迂回状態へ移行（逆走開始）
@@ -353,7 +355,7 @@ export default function AMRSimulator() {
           // 現在位置での障害物圏内チェック
           const inObstacleZone = Math.hypot(b.pos.x - centerX, b.pos.y - centerY) <= OBSTACLE_RADIUS;
           
-          if (hitObstacle || inObstacleZone) {
+          if ((hitObstacle || inObstacleZone) && !b.justPushed) {
             // 衝突時は直前位置に戻し、逆方向に向かう
             b.pos = { x: oldX, y: oldY };
             b.idx = (b.idx - 1 + b.path.length) % b.path.length;
@@ -425,6 +427,7 @@ export default function AMRSimulator() {
           tctx.restore();
         }
         b.prev = { x: newX, y: newY };
+        b.justPushed = false; // フレームの最後でフラグをリセット
       }
 
       // 背景・障害物
