@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { getLoopEdges, positionFromEdge, advanceAlongEdge, isHorizontal, mapProgressToLoop, segmentIntersectsShelves } from "./edgeEngine";
 
 // === CONFIG ===
 // 障害物は固定（中央通路の真ん中）。キー「1」押下中のみ有効。
@@ -48,6 +49,7 @@ const ROBOTS = [
 
 const RADIUS = 12;
 const OBSTACLE_RADIUS = 28;
+const USE_EDGE_ENGINE = (import.meta.env.VITE_EDGE_ENGINE ?? '1') !== '0';
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function clamp(v:number,a:number,b:number){ return Math.max(a, Math.min(b, v)); }
@@ -239,9 +241,29 @@ export default function AMRSimulator() {
       restorePending?: boolean; // 水平エッジに入ったら復帰開始
       transition?: { to: LoopName; edge: 'top'|'bottom'; startX:number; targetX:number; y:number; progress: number };
       justPushed?: boolean; // 障害物ON時に押し出されたばかりか
+      // Edge Engine 状態
+      edgeId?: number;   // 0..3
+      edgeDir?: 1 | -1;  // 時計=1 / 反時計=-1
+      edgeS?: number;    // 0..length
+      justSwitched?: boolean;
+      edgeTransition?: { toLoop: LoopName; dstEdgeId: number; dstEdgeS: number; startX: number; targetX: number; y: number; progress: number };
+      obstacleGrace?: number; // 衝突直後の数フレームは再衝突チェックをスキップ
     };
 
     const pickStart: LoopName[] = ["leftMid", "center", "rightMid"];
+
+    function setEdgeDirAwayFromCenter(b: Bot) {
+      const edges = getLoopEdges(b.loop);
+      const e = edges[b.edgeId!];
+      const paramDir = e.to >= e.from ? 1 : -1; // +1: 座標はs増加で増える
+      if (e.orientation === 'horizontal') {
+        const wantIncrease = b.pos.x >= xOf('center'); // 中心より右 → さらに右へ
+        b.edgeDir = wantIncrease ? (paramDir === 1 ? 1 : -1) : (paramDir === 1 ? -1 : 1);
+      } else {
+        const wantIncrease = b.pos.y >= CY; // 中心より下 → さらに下へ
+        b.edgeDir = wantIncrease ? (paramDir === 1 ? 1 : -1) : (paramDir === 1 ? -1 : 1);
+      }
+    }
     const bots: Bot[] = ROBOTS.map((r, i) => {
       const loop = pickStart[i % pickStart.length];
       const path = makeLoopWaypoints(loop);
@@ -256,6 +278,14 @@ export default function AMRSimulator() {
         defaultLoop: loop,
         lastIdx: 1,
       };
+      if (USE_EDGE_ENGINE) {
+        bot.edgeId = 0;     // 上辺
+        bot.edgeDir = 1;    // 右方向（時計回り）
+        bot.edgeS = 0;      // 左端スタート
+        const p = positionFromEdge(loop, bot.edgeId, bot.edgeS);
+        bot.pos = { x: p.x, y: p.y };
+        bot.prev = { x: p.x, y: p.y };
+      }
       return bot;
     });
 
@@ -264,7 +294,7 @@ export default function AMRSimulator() {
 
     function step(now: number) {
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  const active = debugHoldRef.current || obstacleServerRef.current;
+      const active = debugHoldRef.current || obstacleServerRef.current;
 
       // 押下を開始したフレームで grace をリセット
       if (active && !prevActive) {
@@ -275,22 +305,40 @@ export default function AMRSimulator() {
         for (const b of bots) { 
           b.restorePending = false;
           if (isCentralLoop(b.loop)) {
-            // 障害物圏内にいるAMRを安全な位置に移動（進行方向と逆へ）
-            const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
-            if (dist <= OBSTACLE_RADIUS) {
-              const target = b.path[b.idx];
-              const movingUp = target.y < b.pos.y;
-              // 進行方向と逆向きに押し戻す
-              b.pos.y += movingUp ? 15 : -15; // 15px押し戻す
-              b.justPushed = true; // このフレームで押し出されたことを記録
+            if (USE_EDGE_ENGINE) {
+              // Edge Engine: 中心から遠ざかる向きに調整し、微小に逃がす
+              b.reroutePending = true;
+              setEdgeDirAwayFromCenter(b);
+              advanceAlongEdge(b as any, 8);
+              const pNew = positionFromEdge(b.loop, b.edgeId!, b.edgeS!);
+              b.pos = { x: pNew.x, y: pNew.y };
+              b.justPushed = true;
+              b.obstacleGrace = Math.max(b.obstacleGrace ?? 0, 6);
+            } else {
+              // 旧ロジック
+              const dist = Math.hypot(b.pos.x - centerX, b.pos.y - centerY);
+              if (dist <= OBSTACLE_RADIUS) {
+                const target = b.path[b.idx];
+                const movingUp = target.y < b.pos.y;
+                b.pos.y += movingUp ? 15 : -15;
+                b.justPushed = true;
+              }
+              b.reroutePending = true;
+              const prevIdx = (b.idx - 1 + b.path.length) % b.path.length;
+              b.idx = prevIdx;
+              b.lastIdx = prevIdx;
             }
-
-            // 即座に迂回状態へ移行（逆走開始）
-            b.reroutePending = true;
-            const prevIdx = (b.idx - 1 + b.path.length) % b.path.length;
-            b.idx = prevIdx;
-            b.lastIdx = prevIdx;
           } else {
+            b.reroutePending = false;
+          }
+        }
+      }
+
+      // 障害物OFF時、デフォルトループへ復帰予約（Edge Engine）
+      if (USE_EDGE_ENGINE && !active) {
+        for (const b of bots) {
+          if (b.loop !== b.defaultLoop) {
+            b.restorePending = true;
             b.reroutePending = false;
           }
         }
@@ -304,53 +352,154 @@ export default function AMRSimulator() {
         // 線分の始点
         const oldX = b.pos.x, oldY = b.pos.y;
 
-        // 1) ルート横移動トランジション中はXのみ補間（水平通路上）。斜め禁止。
-        if (b.transition) {
-          const p = b.transition;
-          const len = Math.max(1, Math.abs(p.targetX - p.startX));
-          b.transition.progress = clamp(b.transition.progress + (TRANSITION_VEL / len) * dt, 0, 1);
-          b.pos = { x: lerp(p.startX, p.targetX, b.transition.progress), y: p.y };
-          if (b.transition.progress >= 1) {
-            // 新ループに確定し、水平エッジ上の適切なidxへ（同じ水平エッジの角に向かう）
-            b.loop = p.to; b.path = makeLoopWaypoints(p.to);
-            b.idx = (p.edge === 'top') ? 1 : 3; // top: 上辺の右角 / bottom: 下辺の左角
-            b.transition = undefined;
-          }
-        } else {
-          // 2) 通常の矩形周回
-          const target = b.path[b.idx];
-          const dx = target.x - b.pos.x;
-          const dy = target.y - b.pos.y;
-          const v = b.speed * dt;
-          const d = Math.hypot(dx, dy);
-          if (d <= v) { // Targetに到達
-            b.pos = { x: target.x, y: target.y };
-            // 次のwaypointへ
-            // 迂回待機中は、経路を逆走しつづける
-            if (isCentralLoop(b.loop) && b.reroutePending) {
-              b.idx = (b.idx - 1 + b.path.length) % b.path.length;
-            } else {
-              b.idx = (b.idx + 1) % b.path.length;
+        if (USE_EDGE_ENGINE) {
+          // Edge Engine: エッジ上の1次元運動 + 切替は水平スライド演出
+          const before = { loop: b.loop, edgeId: b.edgeId!, edgeDir: b.edgeDir!, edgeS: b.edgeS! };
+
+          // 既に水平スライド中なら継続
+          if (b.edgeTransition) {
+            const p = b.edgeTransition;
+            const len = Math.max(1, Math.abs(p.targetX - p.startX));
+            p.progress = clamp(p.progress + (TRANSITION_VEL / len) * dt, 0, 1);
+            b.pos = { x: lerp(p.startX, p.targetX, p.progress), y: p.y };
+            if (p.progress >= 1) {
+              // 切替確定
+              b.loop = p.toLoop;
+              b.edgeId = p.dstEdgeId;
+              b.edgeS = p.dstEdgeS;
+              b.edgeTransition = undefined;
+              b.justSwitched = true;
             }
           } else {
-            // まだTargetに到達していない
-            b.pos.x += dx / d * v;
-            b.pos.y += dy / d * v;
+            // 通常前進
+            const ds = b.speed * dt;
+            advanceAlongEdge(b as any, ds);
+
+            // 予約済みの切替（水平エッジのみ）
+            const edgesNow = getLoopEdges(b.loop);
+            const e = edgesNow[b.edgeId!];
+            if (isHorizontal(e)) {
+              if (b.reroutePending) {
+                const to = chooseDetourFor(b.defaultLoop);
+                if (to !== b.loop) {
+                  const tRel = e.length === 0 ? 0 : (b.edgeS! / e.length);
+                  const { dstEdgeId, edgeS } = mapProgressToLoop(b.loop, to, b.edgeId!, tRel);
+                  const dstEdges = getLoopEdges(to);
+                  const dst = dstEdges[dstEdgeId];
+                  const start = positionFromEdge(b.loop, b.edgeId!, b.edgeS!);
+                  const targetX = dst.from <= dst.to ? (dst.from + tRel * dst.length) : (dst.from - tRel * dst.length);
+                  b.edgeTransition = { toLoop: to, dstEdgeId, dstEdgeS: edgeS, startX: start.x, targetX, y: e.fixedCoord, progress: 0 };
+                  b.reroutePending = false;
+                } else {
+                  b.reroutePending = false;
+                }
+              } else if (b.restorePending && !active) {
+                const to = b.defaultLoop;
+                const tRel = e.length === 0 ? 0 : (b.edgeS! / e.length);
+                const { dstEdgeId, edgeS } = mapProgressToLoop(b.loop, to, b.edgeId!, tRel);
+                const dstEdges = getLoopEdges(to);
+                const dst = dstEdges[dstEdgeId];
+                const start = positionFromEdge(b.loop, b.edgeId!, b.edgeS!);
+                const targetX = dst.from <= dst.to ? (dst.from + tRel * dst.length) : (dst.from - tRel * dst.length);
+                b.edgeTransition = { toLoop: to, dstEdgeId, dstEdgeS: edgeS, startX: start.x, targetX, y: e.fixedCoord, progress: 0 };
+                b.restorePending = false;
+              }
+            }
+
+            // 新しい座標へ反映（スライド開始していなければ）
+            if (!b.edgeTransition) {
+              const pNew = positionFromEdge(b.loop, b.edgeId!, b.edgeS!);
+              const newX = pNew.x, newY = pNew.y;
+              // 円形障害物ヒットチェック（中央系ループのみ）
+              let collided = false;
+              if (active && isCentralLoop(b.loop) && !(b.obstacleGrace && b.obstacleGrace > 0)) {
+                const centerX = xOf("center");
+                const centerY = CY;
+                const hitObstacle = segmentIntersectsCircle(
+                  oldX, oldY, newX, newY,
+                  centerX, centerY, OBSTACLE_RADIUS,
+                );
+                const inObstacleZone = Math.hypot(newX - centerX, newY - centerY) <= OBSTACLE_RADIUS;
+                if ((hitObstacle || inObstacleZone) && !b.justPushed) {
+                  // ロールバックして逆走、迂回予約
+                  b.loop = before.loop;
+                  b.edgeId = before.edgeId;
+                  b.edgeS = before.edgeS;
+                  setEdgeDirAwayFromCenter(b);
+                  // 微小逃がし
+                  advanceAlongEdge(b as any, 8);
+                  b.reroutePending = true;
+                  b.restorePending = false;
+                  b.justPushed = true;
+                  b.obstacleGrace = 3; // 次の3フレームは再判定をスキップ
+                  collided = true;
+                  if (!obstacleTriggeredRef.current) {
+                    obstacleTriggeredRef.current = true;
+                    for (const ob of bots) {
+                      if (isCentralLoop(ob.loop) && !ob.reroutePending) {
+                        ob.reroutePending = true;
+                        ob.restorePending = false;
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (!collided && segmentIntersectsShelves({ x: oldX, y: oldY }, { x: newX, y: newY })) {
+                b.loop = before.loop;
+                b.edgeId = before.edgeId;
+                b.edgeDir = before.edgeDir;
+                b.edgeS = before.edgeS;
+              } else {
+                b.pos = { x: newX, y: newY };
+              }
+            }
+          }
+        } else {
+          // 旧ロジック: 角-頂点ベクトル移動
+          // 1) ルート横移動トランジション中はXのみ補間（水平通路上）。斜め禁止。
+          if (b.transition) {
+            const p = b.transition;
+            const len = Math.max(1, Math.abs(p.targetX - p.startX));
+            b.transition.progress = clamp(b.transition.progress + (TRANSITION_VEL / len) * dt, 0, 1);
+            b.pos = { x: lerp(p.startX, p.targetX, b.transition.progress), y: p.y };
+            if (b.transition.progress >= 1) {
+              b.loop = p.to; b.path = makeLoopWaypoints(p.to);
+              b.idx = (p.edge === 'top') ? 1 : 3;
+              b.transition = undefined;
+            }
+          } else {
+            // 2) 通常の矩形周回
+            const target = b.path[b.idx];
+            const dx = target.x - b.pos.x;
+            const dy = target.y - b.pos.y;
+            const v = b.speed * dt;
+            const d = Math.hypot(dx, dy);
+            if (d <= v) {
+              b.pos = { x: target.x, y: target.y };
+              if (isCentralLoop(b.loop) && b.reroutePending) {
+                b.idx = (b.idx - 1 + b.path.length) % b.path.length;
+              } else {
+                b.idx = (b.idx + 1) % b.path.length;
+              }
+            } else {
+              b.pos.x += dx / d * v;
+              b.pos.y += dy / d * v;
+            }
           }
         }
 
-        // ラップ境界検出
-        const wrapped = b.lastIdx > b.idx; b.lastIdx = b.idx;
-
-        if (wrapped) {
-          if (active && isCentralLoop(b.loop)) {
-            // 中央系ループで障害物ON時は迂回予約
-            b.reroutePending = true;
-          } else if (!active) {
-            // 障害物OFF時は元ルートへ復帰予約
-            if (b.loop !== b.defaultLoop) { 
-              b.restorePending = true; 
-              b.reroutePending = false; 
+        // ラップ境界検出（旧ロジックのみ）
+        if (!USE_EDGE_ENGINE) {
+          const wrapped = b.lastIdx > b.idx; b.lastIdx = b.idx;
+          if (wrapped) {
+            if (active && isCentralLoop(b.loop)) {
+              b.reroutePending = true;
+            } else if (!active) {
+              if (b.loop !== b.defaultLoop) { 
+                b.restorePending = true; 
+                b.reroutePending = false; 
+              }
             }
           }
         }
@@ -359,7 +508,7 @@ export default function AMRSimulator() {
         const centerX = xOf("center");
         const centerY = CY;
         
-        if (active && isCentralLoop(b.loop)) {
+        if (!USE_EDGE_ENGINE && active && isCentralLoop(b.loop)) {
           // 移動軌跡での衝突チェック
           const hitObstacle = segmentIntersectsCircle(
             oldX,
@@ -399,8 +548,8 @@ export default function AMRSimulator() {
         }
 
 
-        // 3) 予約済みの切替を実行（水平エッジ上でのみ）
-        if (!b.transition) {
+        // 3) 予約済みの切替を実行（旧ロジック 水平エッジ上でのみ）
+        if (!USE_EDGE_ENGINE && !b.transition) {
           const rel = horizontalRel(b.loop, b.pos, b.idx);
           if (rel) {
             if (b.reroutePending) {
@@ -432,7 +581,8 @@ export default function AMRSimulator() {
 
         // 4) 軌跡（線分で描画：点々を解消）
         const newX = b.pos.x, newY = b.pos.y;
-        if (Math.hypot(newX - oldX, newY - oldY) > 0.1) {
+        const skipTrail = USE_EDGE_ENGINE && b.justSwitched;
+        if (!skipTrail && Math.hypot(newX - oldX, newY - oldY) > 0.1) {
           tctx.save();
           tctx.globalCompositeOperation = 'screen';
           tctx.globalAlpha = 0.95;
@@ -447,6 +597,8 @@ export default function AMRSimulator() {
         }
         b.prev = { x: newX, y: newY };
         b.justPushed = false; // フレームの最後でフラグをリセット
+        if (USE_EDGE_ENGINE && b.obstacleGrace && b.obstacleGrace > 0) b.obstacleGrace -= 1;
+        if (USE_EDGE_ENGINE) b.justSwitched = false;
       }
 
       // 背景・障害物
