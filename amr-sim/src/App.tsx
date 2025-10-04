@@ -143,15 +143,20 @@ function runSelfTests() {
   if (errs.length) console.error('[AMR self-tests] FAILED:', errs); else console.log('[AMR self-tests] OK');
 }
 
-const POLL_ENDPOINT = import.meta.env.VITE_OBSTACLE_ENDPOINT ?? "/obstacle";
-const POLL_INTERVAL_MS = 1000;
+// --- Occupancy (hull) 連携設定 ---
+// Python 側(scripts/main.py --serve-density)で FastAPI サーバを立て /density で {"hull_occ": <float>} を返す想定
+const POLL_ENDPOINT = import.meta.env.VITE_DENSITY_ENDPOINT || "http://127.0.0.1:8000/density";
+const POLL_INTERVAL_MS = 1000; // ms
+const HULL_THRESHOLD = Number(import.meta.env.VITE_HULL_THRESHOLD ?? 0.25); // この値以上で障害物ON
+const ENABLE_POLL_DEBUG = (import.meta.env.VITE_POLL_DEBUG ?? 'true') !== 'false';
 
 export default function AMRSimulator() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const trailRef = useRef<HTMLCanvasElement | null>(null);
   const debugHoldRef = useRef(false);
-  const obstacleServerRef = useRef(false);
+  const obstacleServerRef = useRef(false); // 閾値判定後のON/OFF
   const obstacleTriggeredRef = useRef(false);
+  const lastHullRef = useRef(0); // 取得した最新 hull 占有率（表示/デバッグ用途）
 
   // キー入力（1で障害ON/OFF）
   useEffect(() => {
@@ -168,15 +173,28 @@ export default function AMRSimulator() {
 
     async function pollOnce() {
       try {
-        const res = await fetch(POLL_ENDPOINT, { cache: "no-store" });
+        if (ENABLE_POLL_DEBUG) console.log(`[AMR][poll] fetch -> ${POLL_ENDPOINT}`);
+        const url = POLL_ENDPOINT.includes('?') ? `${POLL_ENDPOINT}&_ts=${Date.now()}` : `${POLL_ENDPOINT}?_ts=${Date.now()}`;
+        const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) throw new Error(`status ${res.status}`);
-        const text = await res.text();
+        let hull = 0;
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const json = await res.json();
+          hull = Number(json?.hull_occ ?? json?.hull ?? json?.occupancy ?? 0);
+        } else {
+          const text = await res.text();
+          hull = Number(text.trim());
+          if (Number.isNaN(hull)) hull = text.trim() === '1' ? 1 : 0;
+        }
         if (!mounted) return;
-        obstacleServerRef.current = text.trim() === "1";
+        lastHullRef.current = hull;
+        obstacleServerRef.current = hull >= HULL_THRESHOLD;
+        if (ENABLE_POLL_DEBUG) console.log(`[AMR][poll] hull=${hull.toFixed(3)} thr=${HULL_THRESHOLD} => obstacle=${obstacleServerRef.current}`);
       } catch (err) {
         if (!mounted) return;
         obstacleServerRef.current = false;
-        console.warn("[AMR] obstacle polling failed", err);
+        if (ENABLE_POLL_DEBUG) console.warn("[AMR][poll] failed", err);
       }
       if (!debugHoldRef.current && !obstacleServerRef.current) {
         obstacleTriggeredRef.current = false;
@@ -441,7 +459,12 @@ export default function AMRSimulator() {
       for (const b of bots) { ctx.save(); ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, RADIUS, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
 
       // UI
-      ctx.save(); ctx.font = "14px monospace"; ctx.fillStyle = "#9aa4"; ctx.fillText(`Hold '1': obstacle ON | Switch only on horizontal edge (no diagonal) | vel-limited switch | ${SPEED_MULT}× speed`, 16, 24); ctx.restore();
+  ctx.save();
+  ctx.font = "14px monospace";
+  ctx.fillStyle = "#9aa4";
+  const hullTxt = `hull_occ=${lastHullRef.current.toFixed(2)} (thr ${HULL_THRESHOLD})`;
+  ctx.fillText(`Hold '1': manual obstacle | auto-from hull | ${hullTxt} | switch only on horizontal edge | vel-limited | ${SPEED_MULT}× speed`, 16, 24);
+  ctx.restore();
 
       prevActive = active;
       requestAnimationFrame(step);
